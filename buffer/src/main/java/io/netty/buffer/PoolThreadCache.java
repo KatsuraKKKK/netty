@@ -32,8 +32,9 @@ import java.util.Queue;
 /**
  * Acts a Thread cache for allocations. This implementation is moduled after
  * <a href="http://people.freebsd.org/~jasone/jemalloc/bsdcan2006/jemalloc.pdf">jemalloc</a> and the descripted
- * technics of <a href="https://www.facebook.com/notes/facebook-engineering/scalable-memory-allocation-using-jemalloc/
- * 480222803919">Scalable memory allocation using jemalloc</a>.
+ * technics of
+ * <a href="https://www.facebook.com/notes/facebook-engineering/scalable-memory-allocation-using-jemalloc/480222803919">
+ * Scalable memory allocation using jemalloc</a>.
  */
 final class PoolThreadCache {
 
@@ -55,29 +56,21 @@ final class PoolThreadCache {
     private final int numShiftsNormalHeap;
     private final int freeSweepAllocationThreshold;
 
-    private int allocations;
+    private final Thread deathWatchThread;
+    private final Runnable freeTask;
 
-    private final Thread thread = Thread.currentThread();
-    private final Runnable freeTask = new Runnable() {
-        @Override
-        public void run() {
-            free0();
-        }
-    };
+    private int allocations;
 
     // TODO: Test if adding padding helps under contention
     //private long pad0, pad1, pad2, pad3, pad4, pad5, pad6, pad7;
 
     PoolThreadCache(PoolArena<byte[]> heapArena, PoolArena<ByteBuffer> directArena,
                     int tinyCacheSize, int smallCacheSize, int normalCacheSize,
-                    int maxCachedBufferCapacity, int freeSweepAllocationThreshold) {
+                    int maxCachedBufferCapacity, int freeSweepAllocationThreshold,
+                    boolean useThreadDeathWatcher) {
         if (maxCachedBufferCapacity < 0) {
             throw new IllegalArgumentException("maxCachedBufferCapacity: "
                     + maxCachedBufferCapacity + " (expected: >= 0)");
-        }
-        if (freeSweepAllocationThreshold < 1) {
-            throw new IllegalArgumentException("freeSweepAllocationThreshold: "
-                    + freeSweepAllocationThreshold + " (expected: > 0)");
         }
         this.freeSweepAllocationThreshold = freeSweepAllocationThreshold;
         this.heapArena = heapArena;
@@ -120,14 +113,37 @@ final class PoolThreadCache {
             numShiftsNormalHeap = -1;
         }
 
-        // The thread-local cache will keep a list of pooled buffers which must be returned to
-        // the pool when the thread is not alive anymore.
-        ThreadDeathWatcher.watch(thread, freeTask);
+        // Only check if there are caches in use.
+        if ((tinySubPageDirectCaches != null || smallSubPageDirectCaches != null || normalDirectCaches != null
+                || tinySubPageHeapCaches != null || smallSubPageHeapCaches != null || normalHeapCaches != null)
+                && freeSweepAllocationThreshold < 1) {
+            throw new IllegalArgumentException("freeSweepAllocationThreshold: "
+                    + freeSweepAllocationThreshold + " (expected: > 0)");
+        }
+
+        if (useThreadDeathWatcher) {
+
+            freeTask = new Runnable() {
+                @Override
+                public void run() {
+                    free0();
+                }
+            };
+
+            deathWatchThread = Thread.currentThread();
+
+            // The thread-local cache will keep a list of pooled buffers which must be returned to
+            // the pool when the thread is not alive anymore.
+            ThreadDeathWatcher.watch(deathWatchThread, freeTask);
+        } else {
+            freeTask = null;
+            deathWatchThread = null;
+        }
     }
 
     private static <T> MemoryRegionCache<T>[] createSubPageCaches(
             int cacheSize, int numCaches, SizeClass sizeClass) {
-        if (cacheSize > 0) {
+        if (cacheSize > 0 && numCaches > 0) {
             @SuppressWarnings("unchecked")
             MemoryRegionCache<T>[] cache = new MemoryRegionCache[numCaches];
             for (int i = 0; i < cache.length; i++) {
@@ -142,7 +158,7 @@ final class PoolThreadCache {
 
     private static <T> MemoryRegionCache<T>[] createNormalCaches(
             int cacheSize, int maxCachedBufferCapacity, PoolArena<T> area) {
-        if (cacheSize > 0) {
+        if (cacheSize > 0 && maxCachedBufferCapacity > 0) {
             int max = Math.min(area.chunkSize, maxCachedBufferCapacity);
             int arraySize = Math.max(1, log2(max / area.pageSize) + 1);
 
@@ -231,7 +247,10 @@ final class PoolThreadCache {
      *  Should be called if the Thread that uses this cache is about to exist to release resources out of the cache
      */
     void free() {
-        ThreadDeathWatcher.unwatch(thread, freeTask);
+        if (freeTask != null) {
+            assert deathWatchThread != null;
+            ThreadDeathWatcher.unwatch(deathWatchThread, freeTask);
+        }
         free0();
     }
 
@@ -244,7 +263,7 @@ final class PoolThreadCache {
                 free(normalHeapCaches);
 
         if (numFreed > 0 && logger.isDebugEnabled()) {
-            logger.debug("Freed {} thread-local buffer(s) from thread: {}", numFreed, thread.getName());
+            logger.debug("Freed {} thread-local buffer(s) from thread: {}", numFreed, Thread.currentThread().getName());
         }
 
         if (directArena != null) {

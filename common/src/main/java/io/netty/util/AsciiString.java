@@ -37,7 +37,7 @@ import static io.netty.util.internal.ObjectUtil.checkNotNull;
  * A string which has been encoded into a character encoding whose character always takes a single byte, similarly to
  * ASCII. It internally keeps its content in a byte array unlike {@link String}, which uses a character array, for
  * reduced memory footprint and faster data transfer from/to byte-based data structures such as a byte array and
- * {@link ByteBuffer}. It is often used in conjunction with {@link Headers} that require a {@link CharSequence}.
+ * {@link ByteBuffer}. It is often used in conjunction with {@code Headers} that require a {@link CharSequence}.
  * <p>
  * This class was designed to provide an immutable array of bytes, and caches some internal state based upon the value
  * of this array. However underlying access to this byte array is provided via not copying the array on construction or
@@ -45,7 +45,7 @@ import static io.netty.util.internal.ObjectUtil.checkNotNull;
  * {@link #arrayChanged()} so the state of this class can be reset.
  */
 public final class AsciiString implements CharSequence, Comparable<CharSequence> {
-    public static final AsciiString EMPTY_STRING = new AsciiString("");
+    public static final AsciiString EMPTY_STRING = cached("");
     private static final char MAX_CHAR_VALUE = 255;
 
     public static final int INDEX_NOT_FOUND = -1;
@@ -1006,7 +1006,36 @@ public final class AsciiString implements CharSequence, Comparable<CharSequence>
     }
 
     /**
-     * Copies this string removing white space characters from the beginning and end of the string.
+     * Copies this string removing white space characters from the beginning and end of the string, and tries not to
+     * copy if possible.
+     *
+     * @param c The {@link CharSequence} to trim.
+     * @return a new string with characters {@code <= \\u0020} removed from the beginning and the end.
+     */
+    public static CharSequence trim(CharSequence c) {
+        if (c.getClass() == AsciiString.class) {
+            return ((AsciiString) c).trim();
+        }
+        if (c instanceof String) {
+            return ((String) c).trim();
+        }
+        int start = 0, last = c.length() - 1;
+        int end = last;
+        while (start <= end && c.charAt(start) <= ' ') {
+            start++;
+        }
+        while (end >= start && c.charAt(end) <= ' ') {
+            end--;
+        }
+        if (start == 0 && end == last) {
+            return c;
+        }
+        return c.subSequence(start, end);
+    }
+
+    /**
+     * Duplicates this string removing white space characters from the beginning and end of the
+     * string, without copying.
      *
      * @return a new string with characters {@code <= \\u0020} removed from the beginning and the end.
      */
@@ -1121,10 +1150,12 @@ public final class AsciiString implements CharSequence, Comparable<CharSequence>
      */
     @Override
     public int hashCode() {
-        if (hash == 0) {
-            hash = PlatformDependent.hashCodeAscii(value, offset, length);
+        int h = hash;
+        if (h == 0) {
+            h = PlatformDependent.hashCodeAscii(value, offset, length);
+            hash = h;
         }
-        return hash;
+        return h;
     }
 
     @Override
@@ -1144,20 +1175,21 @@ public final class AsciiString implements CharSequence, Comparable<CharSequence>
 
     /**
      * Translates the entire byte string to a {@link String}.
-     * @see {@link #toString(int)}
+     * @see #toString(int)
      */
     @Override
     public String toString() {
-        if (string != null) {
-            return string;
+        String cache = string;
+        if (cache == null) {
+            cache = toString(0);
+            string = cache;
         }
-        string = toString(0);
-        return string;
+        return cache;
     }
 
     /**
      * Translates the entire byte string to a {@link String} using the {@code charset} encoding.
-     * @see {@link #toString(int, int)}
+     * @see #toString(int, int)
      */
     public String toString(int start) {
         return toString(start, length());
@@ -1382,6 +1414,18 @@ public final class AsciiString implements CharSequence, Comparable<CharSequence>
      */
     public static AsciiString of(CharSequence string) {
         return string.getClass() == AsciiString.class ? (AsciiString) string : new AsciiString(string);
+    }
+
+    /**
+     * Returns an {@link AsciiString} containing the given string and retains/caches the input
+     * string for later use in {@link #toString()}.
+     * Used for the constants (which already stored in the JVM's string table) and in cases
+     * where the guaranteed use of the {@link #toString()} method.
+     */
+    public static AsciiString cached(String string) {
+        AsciiString asciiString = new AsciiString(string);
+        asciiString.string = string;
+        return asciiString;
     }
 
     /**
@@ -1690,7 +1734,6 @@ public final class AsciiString implements CharSequence, Comparable<CharSequence>
      * @param startPos  the start position, negative treated as zero
      * @return the first index of the search CharSequence (always &ge; startPos),
      *  -1 if no match or {@code null} string input
-     * @throws NullPointerException if {@code cs} or {@code string} is {@code null}.
      */
     public static int indexOfIgnoreCase(final CharSequence str, final CharSequence searchStr, int startPos) {
         if (str == null || searchStr == null) {
@@ -1744,7 +1787,6 @@ public final class AsciiString implements CharSequence, Comparable<CharSequence>
      * @param startPos  the start position, negative treated as zero
      * @return the first index of the search CharSequence (always &ge; startPos),
      *  -1 if no match or {@code null} string input
-     * @throws NullPointerException if {@code cs} or {@code string} is {@code null}.
      */
     public static int indexOfIgnoreCaseAscii(final CharSequence str, final CharSequence searchStr, int startPos) {
         if (str == null || searchStr == null) {
